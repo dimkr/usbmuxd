@@ -28,7 +28,9 @@
 #include <stdarg.h>
 #include <time.h>
 #include <sys/time.h>
+#ifndef WIN32
 #include <syslog.h>
+#endif
 
 #include "log.h"
 #include "utils.h"
@@ -39,19 +41,24 @@ int log_syslog = 0;
 
 void log_enable_syslog()
 {
+#ifndef WIN32
 	if (!log_syslog) {
 		openlog("usbmuxd", LOG_PID, 0);
 		log_syslog = 1;
 	}
+#endif
 }
 
 void log_disable_syslog()
 {
+#ifndef WIN32
 	if (log_syslog) {
 		closelog();
 	}
+#endif
 }
 
+#ifndef WIN32
 static int level_to_syslog_level(int level)
 {
 	int result = level + LOG_CRIT;
@@ -60,6 +67,7 @@ static int level_to_syslog_level(int level)
 	}
 	return result;
 }
+#endif
 
 void usbmuxd_log(enum loglevel level, const char *fmt, ...)
 {
@@ -75,7 +83,9 @@ void usbmuxd_log(enum loglevel level, const char *fmt, ...)
 		sprintf(fs, "[%d] %s\n", level, fmt);
 	} else {
 		struct timeval ts;
+#ifdef HAVE_LOCALTIME_R
 		struct tm tp_;
+#endif
 		struct tm *tp;
 
 		gettimeofday(&ts, NULL);
@@ -91,7 +101,9 @@ void usbmuxd_log(enum loglevel level, const char *fmt, ...)
 
 	va_start(ap, fmt);
 	if (log_syslog) {
+#ifndef WIN32
 		vsyslog(level_to_syslog_level(level), fs, ap);
+#endif
 	} else {
 		vfprintf(stderr, fs, ap);
 	}

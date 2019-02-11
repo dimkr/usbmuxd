@@ -22,7 +22,11 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+#ifdef WIN32
+#include <windows.h>
+#else
 #include <poll.h>
+#endif
 #include <plist/plist.h>
 
 enum fdowner {
@@ -32,7 +36,11 @@ enum fdowner {
 };
 
 struct fdlist {
+#ifdef WIN32
+	DWORD count;
+#else
 	int count;
+#endif
 	int capacity;
 	enum fdowner *owners;
 	struct pollfd *fds;

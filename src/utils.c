@@ -34,6 +34,9 @@
 #ifdef __APPLE__
 #include <mach/mach_time.h>
 #endif
+#ifdef WIN32
+#include <winsock2.h>
+#endif
 
 #include "utils.h"
 
@@ -324,7 +327,7 @@ int plist_write_to_filename(plist_t plist, const char *filename, enum plist_form
 	return res;
 }
 
-#ifndef HAVE_CLOCK_GETTIME
+#if !defined(HAVE_CLOCK_GETTIME) && !defined(WIN32)
 typedef int clockid_t;
 #define CLOCK_MONOTONIC 1
 

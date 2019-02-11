@@ -30,11 +30,15 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/types.h>
+#ifdef WIN32
+#include <winsock2.h>
+#else
 #include <sys/socket.h>
 #include <netinet/tcp.h>
 #include <sys/un.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#endif
 #include <fcntl.h>
 
 #include <plist/plist.h>
@@ -75,7 +79,11 @@ struct mux_client {
 };
 
 static struct collection client_list;
+#ifdef WIN32
+HANDLE client_list_mutex;
+#else
 pthread_mutex_t client_list_mutex;
+#endif
 static uint32_t client_number = 0;
 
 /**
@@ -93,7 +101,11 @@ int client_read(struct mux_client *client, void *buffer, uint32_t len)
 		usbmuxd_log(LL_ERROR, "Attempted to read from client %d not in CONNECTED state", client->fd);
 		return -1;
 	}
+#ifdef WIN32
+	return recv(client->fd, (char *)buffer, len, 0);
+#else
 	return recv(client->fd, buffer, len, 0);
+#endif
 }
 
 /**
@@ -159,15 +171,24 @@ int client_set_events(struct mux_client *client, short events)
  */
 int client_accept(int listenfd)
 {
+#ifdef WIN32
+	struct sockaddr_in addr;
+#else
 	struct sockaddr_un addr;
+#endif
 	int cfd;
-	socklen_t len = sizeof(struct sockaddr_un);
+#ifdef WIN32
+	int len = sizeof(addr);
+#else
+	socklen_t len = sizeof(addr);
+#endif
 	cfd = accept(listenfd, (struct sockaddr *)&addr, &len);
 	if (cfd < 0) {
 		usbmuxd_log(LL_ERROR, "accept() failed (%s)", strerror(errno));
 		return cfd;
 	}
 
+#ifndef WIN32
 	int flags = fcntl(cfd, F_GETFL, 0);
 	if (flags < 0) {
 		usbmuxd_log(LL_ERROR, "ERROR: Could not get socket flags!");
@@ -176,12 +197,21 @@ int client_accept(int listenfd)
 			usbmuxd_log(LL_ERROR, "ERROR: Could not set socket to non-blocking mode");
 		}
 	}
+#endif
 
 	int bufsize = 0x20000;
+#ifdef WIN32
+	if (setsockopt(cfd, SOL_SOCKET, SO_SNDBUF, (const char *)&bufsize, sizeof(int)) == -1) {
+#else
 	if (setsockopt(cfd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(int)) == -1) {
+#endif
 		usbmuxd_log(LL_WARNING, "Could not set send buffer for client socket");
 	}
+#ifdef WIN32
+	if (setsockopt(cfd, SOL_SOCKET, SO_RCVBUF, (const char *)&bufsize, sizeof(int)) == -1) {
+#else
 	if (setsockopt(cfd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(int)) == -1) {
+#endif
 		usbmuxd_log(LL_WARNING, "Could not set receive buffer for client socket");
 	}
 
@@ -203,10 +233,18 @@ int client_accept(int listenfd)
 	client->events = POLLIN;
 	client->info = NULL;
 
+#ifdef WIN32
+	WaitForSingleObject(client_list_mutex, INFINITE);
+#else
 	pthread_mutex_lock(&client_list_mutex);
+#endif
 	client->number = client_number++;
 	collection_add(&client_list, client);
+#ifdef WIN32
+	ReleaseMutex(client_list_mutex);
+#else
 	pthread_mutex_unlock(&client_list_mutex);
+#endif
 
 #ifdef SO_PEERCRED
 	if (log_level >= LL_INFO) {
@@ -239,19 +277,35 @@ void client_close(struct mux_client *client)
 	free(client->ib_buf);
 	plist_free(client->info);
 
-	pthread_mutex_lock(&client_list_mutex);
+#ifdef WIN32
+        WaitForSingleObject(client_list_mutex, INFINITE);
+#else
+        pthread_mutex_lock(&client_list_mutex);
+#endif
 	collection_remove(&client_list, client);
-	pthread_mutex_unlock(&client_list_mutex);
+#ifdef WIN32
+        ReleaseMutex(client_list_mutex);
+#else
+        pthread_mutex_unlock(&client_list_mutex);
+#endif
 	free(client);
 }
 
 void client_get_fds(struct fdlist *list)
 {
-	pthread_mutex_lock(&client_list_mutex);
+#ifdef WIN32
+        WaitForSingleObject(client_list_mutex, INFINITE);
+#else
+        pthread_mutex_lock(&client_list_mutex);
+#endif
 	FOREACH(struct mux_client *client, &client_list) {
 		fdlist_add(list, FD_CLIENT, client->fd, client->events);
 	} ENDFOREACH
-	pthread_mutex_unlock(&client_list_mutex);
+#ifdef WIN32
+        ReleaseMutex(client_list_mutex);
+#else
+        pthread_mutex_unlock(&client_list_mutex);
+#endif
 }
 
 static int send_pkt(struct mux_client *client, uint32_t tag, enum usbmuxd_msgtype msg, void *payload, int payload_length)
@@ -390,7 +444,11 @@ static int send_listener_list(struct mux_client *client, uint32_t tag)
 	plist_t dict = plist_new_dict();
 	plist_t listeners = plist_new_array();
 
-	pthread_mutex_lock(&client_list_mutex);
+#ifdef WIN32
+        WaitForSingleObject(client_list_mutex, INFINITE);
+#else
+        pthread_mutex_lock(&client_list_mutex);
+#endif
 	FOREACH(struct mux_client *lc, &client_list) {
 		if (lc->state == CLIENT_LISTEN) {
 			plist_t n = NULL;
@@ -437,7 +495,11 @@ static int send_listener_list(struct mux_client *client, uint32_t tag)
 			plist_array_append_item(listeners, l);
 		}
 	} ENDFOREACH
-	pthread_mutex_unlock(&client_list_mutex);
+#ifdef WIN32
+        ReleaseMutex(client_list_mutex);
+#else
+        pthread_mutex_unlock(&client_list_mutex);
+#endif
 
 	plist_dict_set_item(dict, "ListenerList", listeners);
 	res = send_plist_pkt(client, tag, dict);
@@ -856,7 +918,11 @@ static void process_send(struct mux_client *client)
 		client->events &= ~POLLOUT;
 		return;
 	}
+#ifdef WIN32
+	res = send(client->fd, (const char *)client->ob_buf, client->ob_size, 0);
+#else
 	res = send(client->fd, client->ob_buf, client->ob_size, 0);
+#endif
 	if(res <= 0) {
 		usbmuxd_log(LL_ERROR, "Send to client fd %d failed: %d %s", client->fd, res, strerror(errno));
 		client_close(client);
@@ -883,7 +949,11 @@ static void process_recv(struct mux_client *client)
 	int res;
 	int did_read = 0;
 	if(client->ib_size < sizeof(struct usbmuxd_header)) {
+#ifdef WIN32
+		res = recv(client->fd, (char *)client->ib_buf + client->ib_size, sizeof(struct usbmuxd_header) - client->ib_size, 0);
+#else
 		res = recv(client->fd, client->ib_buf + client->ib_size, sizeof(struct usbmuxd_header) - client->ib_size, 0);
+#endif
 		if(res <= 0) {
 			if(res < 0)
 				usbmuxd_log(LL_ERROR, "Receive from client fd %d failed: %s", client->fd, strerror(errno));
@@ -911,7 +981,11 @@ static void process_recv(struct mux_client *client)
 	if(client->ib_size < hdr->length) {
 		if(did_read)
 			return; //maybe we would block, so defer to next loop
+#ifdef WIN32
+		res = recv(client->fd, (char *)client->ib_buf + client->ib_size, hdr->length - client->ib_size, 0);
+#else
 		res = recv(client->fd, client->ib_buf + client->ib_size, hdr->length - client->ib_size, 0);
+#endif
 		if(res < 0) {
 			usbmuxd_log(LL_ERROR, "Receive from client fd %d failed: %s", client->fd, strerror(errno));
 			client_close(client);
@@ -932,14 +1006,22 @@ static void process_recv(struct mux_client *client)
 void client_process(int fd, short events)
 {
 	struct mux_client *client = NULL;
-	pthread_mutex_lock(&client_list_mutex);
+#ifdef WIN32
+        WaitForSingleObject(client_list_mutex, INFINITE);
+#else
+        pthread_mutex_lock(&client_list_mutex);
+#endif
 	FOREACH(struct mux_client *lc, &client_list) {
 		if(lc->fd == fd) {
 			client = lc;
 			break;
 		}
 	} ENDFOREACH
-	pthread_mutex_unlock(&client_list_mutex);
+#ifdef WIN32
+        ReleaseMutex(client_list_mutex);
+#else
+        pthread_mutex_unlock(&client_list_mutex);
+#endif
 
 	if(!client) {
 		usbmuxd_log(LL_INFO, "client_process: fd %d not found in client list", fd);
@@ -961,45 +1043,73 @@ void client_process(int fd, short events)
 
 void client_device_add(struct device_info *dev)
 {
-	pthread_mutex_lock(&client_list_mutex);
+#ifdef WIN32
+        WaitForSingleObject(client_list_mutex, INFINITE);
+#else
+        pthread_mutex_lock(&client_list_mutex);
+#endif
 	usbmuxd_log(LL_DEBUG, "client_device_add: id %d, location 0x%x, serial %s", dev->id, dev->location, dev->serial);
 	device_set_visible(dev->id);
 	FOREACH(struct mux_client *client, &client_list) {
 		if(client->state == CLIENT_LISTEN)
 			notify_device_add(client, dev);
 	} ENDFOREACH
-	pthread_mutex_unlock(&client_list_mutex);
+#ifdef WIN32
+        ReleaseMutex(client_list_mutex);
+#else
+        pthread_mutex_unlock(&client_list_mutex);
+#endif
 }
 
 void client_device_remove(int device_id)
 {
-	pthread_mutex_lock(&client_list_mutex);
+#ifdef WIN32
+        WaitForSingleObject(client_list_mutex, INFINITE);
+#else
+        pthread_mutex_lock(&client_list_mutex);
+#endif
 	uint32_t id = device_id;
 	usbmuxd_log(LL_DEBUG, "client_device_remove: id %d", device_id);
 	FOREACH(struct mux_client *client, &client_list) {
 		if(client->state == CLIENT_LISTEN)
 			notify_device_remove(client, id);
 	} ENDFOREACH
-	pthread_mutex_unlock(&client_list_mutex);
+#ifdef WIN32
+        ReleaseMutex(client_list_mutex);
+#else
+        pthread_mutex_unlock(&client_list_mutex);
+#endif
 }
 
 void client_device_paired(int device_id)
 {
-	pthread_mutex_lock(&client_list_mutex);
+#ifdef WIN32
+        WaitForSingleObject(client_list_mutex, INFINITE);
+#else
+        pthread_mutex_lock(&client_list_mutex);
+#endif
 	uint32_t id = device_id;
 	usbmuxd_log(LL_DEBUG, "client_device_paired: id %d", device_id);
 	FOREACH(struct mux_client *client, &client_list) {
 		if (client->state == CLIENT_LISTEN)
 			notify_device_paired(client, id);
 	} ENDFOREACH
+#ifdef WIN32
+        ReleaseMutex(client_list_mutex);
+#else
 	pthread_mutex_unlock(&client_list_mutex);
+#endif
 }
 
 void client_init(void)
 {
 	usbmuxd_log(LL_DEBUG, "client_init");
 	collection_init(&client_list);
+#ifdef WIN32
+	client_list_mutex = CreateMutex(NULL, FALSE, NULL);
+#else
 	pthread_mutex_init(&client_list_mutex, NULL);
+#endif
 }
 
 void client_shutdown(void)
@@ -1008,6 +1118,10 @@ void client_shutdown(void)
 	FOREACH(struct mux_client *client, &client_list) {
 		client_close(client);
 	} ENDFOREACH
+#ifdef WIN32
+	CloseHandle(client_list_mutex);
+#else
 	pthread_mutex_destroy(&client_list_mutex);
+#endif
 	collection_free(&client_list);
 }

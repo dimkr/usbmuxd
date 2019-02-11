@@ -37,6 +37,7 @@
 
 #ifdef WIN32
 #include <shlobj.h>
+#include <winsock2.h>
 #endif
 
 #include "conf.h"
